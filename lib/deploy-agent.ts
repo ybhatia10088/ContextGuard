@@ -148,7 +148,7 @@ export async function runDeployAgent(prompt: string, emitExternal?: EmitTrace): 
   };
   await emit(trace("user", "Operator", prompt));
 
-  let finalOutcome: "blocked" | "deployed" = "blocked";
+  let finalOutcome: "blocked" | "deployed" | "completed" = "completed";
   let finalReason = "The agent completed without a deployment action.";
   let blockedByPolicy = false;
 

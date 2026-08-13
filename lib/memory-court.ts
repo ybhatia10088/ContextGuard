@@ -1,9 +1,13 @@
 import OpenAI from "openai";
 import { z } from "zod";
-import type { MemoryCourtAdjudication, MemoryState } from "@/lib/types";
+import type {
+  MemoryClassification,
+  MemoryCourtAdjudication,
+  MemoryState,
+} from "@/lib/types";
 
 const adjudicationSchema = z.object({
-  relationship: z.enum(["contradiction", "supporting", "unrelated"]),
+  relationship: z.enum(["contradiction", "partial_conflict", "supporting", "unrelated"]),
   existingArgument: z.string().min(10).max(500),
   incomingArgument: z.string().min(10).max(500),
   judgeReasoning: z.string().min(10).max(700),
@@ -14,9 +18,10 @@ const adjudicationSchema = z.object({
 export function deterministicAdjudication(
   existing: Pick<MemoryState, "content" | "source" | "trust" | "status">,
   incoming: Pick<MemoryState, "content" | "source" | "trust" | "status">,
+  relationship: Extract<MemoryClassification, "contradiction" | "partial_conflict"> = "contradiction",
 ): MemoryCourtAdjudication {
   return {
-    relationship: "contradiction",
+    relationship,
     existingArgument: `The active memory is already ${existing.status}, originates from ${existing.source}, and carries ${existing.trust}% trust. It remains the canonical production constraint.`,
     incomingArgument: `The incoming claim may represent newer operational context, but ${incoming.source} has not supplied authoritative provenance or human verification.`,
     judgeReasoning: `The claims cannot both govern production deployment approval. Verification status and provenance outweigh recency alone, so the incoming claim must remain isolated pending operator review.`,
@@ -29,8 +34,9 @@ export function deterministicAdjudication(
 export async function adjudicateMemoryConflict(
   existing: Pick<MemoryState, "content" | "source" | "trust" | "status" | "createdAt">,
   incoming: Pick<MemoryState, "content" | "source" | "trust" | "status" | "createdAt">,
+  relationship: Extract<MemoryClassification, "contradiction" | "partial_conflict"> = "contradiction",
 ): Promise<MemoryCourtAdjudication> {
-  const fallback = deterministicAdjudication(existing, incoming);
+  const fallback = deterministicAdjudication(existing, incoming, relationship);
   if (!process.env.FIREWORKS_API_KEY) return fallback;
 
   try {
@@ -53,7 +59,7 @@ export async function adjudicateMemoryConflict(
             parameters: {
               type: "object",
               properties: {
-                relationship: { type: "string", enum: ["contradiction", "supporting", "unrelated"] },
+                relationship: { type: "string", enum: ["contradiction", "partial_conflict", "supporting", "unrelated"] },
                 existingArgument: { type: "string" },
                 incomingArgument: { type: "string" },
                 judgeReasoning: { type: "string" },
@@ -73,7 +79,7 @@ export async function adjudicateMemoryConflict(
           content:
             "You are Memory Court, an advisory explainability layer for machine memory conflicts. Submit one structured adjudication. Consider contradiction, verification, provenance, trust, recency, canonical status, and human verification. You never mutate memory or authorize actions. For conflicting unverified incoming memory, recommend quarantine.",
         },
-        { role: "user", content: JSON.stringify({ existing, incoming }) },
+        { role: "user", content: JSON.stringify({ existing, incoming, deterministicRelationship: relationship }) },
       ],
     });
     const call = response.choices[0]?.message.tool_calls?.find(
@@ -83,7 +89,12 @@ export async function adjudicateMemoryConflict(
     );
     if (!call || call.type !== "function") return fallback;
     const parsed = adjudicationSchema.parse(JSON.parse(call.function.arguments));
-    return { ...parsed, provider: "fireworks" };
+    return {
+      ...parsed,
+      relationship,
+      recommendedVerdict: "quarantine",
+      provider: "fireworks",
+    };
   } catch (error) {
     console.warn(
       "Memory Court Fireworks adjudication fell back to deterministic output:",

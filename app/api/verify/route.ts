@@ -1,5 +1,10 @@
 import { ObjectId } from "mongodb";
-import { getCollections, readState, recordEvent } from "@/lib/contextguard";
+import {
+  classifyPolicyMemory,
+  getCollections,
+  readState,
+  recordEvent,
+} from "@/lib/contextguard";
 
 export async function POST(request: Request) {
   try {
@@ -17,11 +22,19 @@ export async function POST(request: Request) {
     await recordEvent(events, "human_verification_received", `Operator verification received for ${incoming._id.toHexString()}`);
     const activePolicies = await memories
       .find({ type: "policy", status: "verified" })
-      .project<{ _id: ObjectId }>({ _id: 1 })
       .toArray();
-    const activePolicyIds = activePolicies.map((policy) => policy._id);
+    const storedConflictIds = incoming.conflictsWith ?? [];
+    const activePolicyIds = storedConflictIds.length
+      ? storedConflictIds
+      : activePolicies.flatMap((policy) => {
+          if (!policy._id) return [];
+          const classification = classifyPolicyMemory(policy.content, incoming.content);
+          return classification === "contradiction" || classification === "partial_conflict"
+            ? [policy._id]
+            : [];
+        });
     const superseded = await memories.updateMany(
-      { type: "policy", status: "verified" },
+      { _id: { $in: activePolicyIds }, type: "policy", status: "verified" },
       {
         $set: {
           status: "superseded",

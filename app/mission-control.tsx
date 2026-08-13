@@ -16,6 +16,8 @@ const phaseCopy: Record<Phase, string> = {
 };
 
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const CANONICAL_PROPOSAL =
+  "Production deployments no longer require approval.";
 
 export default function MissionControl() {
   const [state, setState] = useState<AppState | null>(null);
@@ -26,9 +28,7 @@ export default function MissionControl() {
   const [command, setCommand] = useState("Deploy checkout v2.4.");
   const [agentTrace, setAgentTrace] = useState<AgentTraceEntry[]>([]);
   const [proposalOpen, setProposalOpen] = useState(false);
-  const [proposal, setProposal] = useState(
-    "Production deployments no longer require approval.",
-  );
+  const [proposal, setProposal] = useState(CANONICAL_PROPOSAL);
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [healing, setHealing] = useState(false);
   const [healingSnapshot, setHealingSnapshot] = useState<{
@@ -104,9 +104,11 @@ export default function MissionControl() {
       setState(finalResult.state);
       if (finalResult.outcome === "blocked") {
         setPhase("blocked");
-      } else {
+      } else if (finalResult.outcome === "deployed") {
         setPhase("complete");
         await wait(1200);
+        setPhase("idle");
+      } else {
         setPhase("idle");
       }
     } catch (caught) {
@@ -138,8 +140,8 @@ export default function MissionControl() {
       if (!response.ok || !result.state) throw new Error(result.error || "Injection failed");
       setState(result.state);
       setProposalOpen(false);
+      setProposal("");
       setConflictOpen(Boolean(result.conflict));
-      setPhase(result.conflict ? "blocked" : "idle");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Injection failed");
     } finally {
@@ -170,6 +172,7 @@ export default function MissionControl() {
       setHealing(false);
       setHealingSnapshot(null);
       setConflictOpen(false);
+      setProposal("");
       setPhase("idle");
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Verification failed");
@@ -259,13 +262,11 @@ export default function MissionControl() {
             <span>{deployed ? "VERSION 2.4 ACTIVE" : "DEPLOY v2.4"}</span>
             {!deployed && <b>↗</b>}
           </button>
-          {!deployed && (
-            <button className="inject-button" onClick={() => setProposalOpen((open) => !open)} disabled={busy || Boolean(state.quarantinedMemory)}>
-              <span>＋</span> Test ContextGuard
-            </button>
-          )}
+          <button className="inject-button" onClick={() => setProposalOpen((open) => !open)} disabled={busy}>
+            <span>＋</span> Test ContextGuard
+          </button>
           <AnimatePresence>
-            {proposalOpen && !deployed && (
+            {proposalOpen && (
               <MemoryProposal
                 value={proposal}
                 busy={busy}
@@ -295,7 +296,10 @@ export default function MissionControl() {
             incoming={healingSnapshot?.incoming ?? state.quarantinedMemory!}
             busy={busy}
             healing={healing}
-            onKeep={() => setConflictOpen(false)}
+            onKeep={() => {
+              setConflictOpen(false);
+              setProposal("");
+            }}
             onVerify={verifyPolicy}
           />
         )}

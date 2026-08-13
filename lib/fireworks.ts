@@ -62,9 +62,14 @@ export async function explainConflict(
 }
 
 export const deterministicConflict = (verified: string, incoming: string) => {
-  const existingRequiresApproval =
-    /requires?\s+(explicit\s+)?operator\s+approval/i.test(verified);
-  const incomingRemovesApproval =
-    /no\s+longer\s+requires?\s+approval|bypass\s+(?:operator\s+)?approval|deploy(?:ment)?s?\s+(?:can|may)\s+(?:proceed\s+)?without\s+approval/i.test(incoming);
-  return existingRequiresApproval && incomingRemovesApproval;
+  const requiresApproval = (content: string) =>
+    /requires?\s+(?:explicit\s+)?operator\s+approval|approval\s+(?:is\s+)?required/i.test(content) &&
+    !/no\s+longer\s+requires?\s+approval/i.test(content);
+  const removesApproval = (content: string) =>
+    /no\s+longer\s+requires?\s+approval|bypass\s+(?:operator\s+)?approval|deploy(?:ment)?s?\s+(?:can|may)\s+(?:proceed\s+)?without\s+approval/i.test(content);
+
+  return (
+    (requiresApproval(verified) && removesApproval(incoming)) ||
+    (removesApproval(verified) && requiresApproval(incoming))
+  );
 };

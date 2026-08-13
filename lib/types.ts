@@ -1,4 +1,9 @@
 export type MemoryStatus = "verified" | "quarantined" | "superseded";
+export type MemoryClassification =
+  | "compatible"
+  | "contradiction"
+  | "partial_conflict"
+  | "unrelated";
 
 export type ServiceState = {
   service: string;
@@ -22,11 +27,13 @@ export type MemoryState = {
   verifiedAt?: string;
   verifiedBy?: string;
   quarantinedAt?: string;
+  conflictsWith?: string[];
+  classification?: MemoryClassification;
   adjudication?: MemoryCourtAdjudication;
 };
 
 export type MemoryCourtAdjudication = {
-  relationship: "contradiction" | "supporting" | "unrelated";
+  relationship: "contradiction" | "partial_conflict" | "supporting" | "unrelated";
   existingArgument: string;
   incomingArgument: string;
   judgeReasoning: string;
@@ -51,7 +58,7 @@ export type AppState = {
 };
 
 export type DeployResult = {
-  outcome: "blocked" | "deployed";
+  outcome: "blocked" | "deployed" | "completed";
   reason: string;
   state: AppState;
   trace: AgentTraceEntry[];

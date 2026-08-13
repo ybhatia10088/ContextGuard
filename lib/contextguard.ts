@@ -4,6 +4,7 @@ import type {
   AppState,
   ContextEventState,
   MemoryState,
+  MemoryClassification,
   MemoryStatus,
   ServiceState,
 } from "@/lib/types";
@@ -35,6 +36,8 @@ type MemoryDocument = {
   verifiedBy?: string;
   quarantinedAt?: Date;
   adjudication?: MemoryState["adjudication"];
+  conflictsWith?: ObjectId[];
+  classification?: MemoryClassification;
 };
 
 type EventDocument = {
@@ -119,7 +122,65 @@ const serializeMemory = (memory: MemoryDocument & { _id: ObjectId }): MemoryStat
     ? { quarantinedAt: memory.quarantinedAt.toISOString() }
     : {}),
   ...(memory.adjudication ? { adjudication: memory.adjudication } : {}),
+  ...(memory.conflictsWith
+    ? { conflictsWith: memory.conflictsWith.map((id) => id.toHexString()) }
+    : {}),
+  ...(memory.classification ? { classification: memory.classification } : {}),
 });
+
+const approvalDirection = (content: string) => {
+  if (
+    /no\s+longer\s+requires?\s+approval|without\s+(?:explicit\s+|operator\s+|release\s+manager\s+)?approval|bypass\s+(?:operator\s+|release\s+manager\s+)?approval/i.test(
+      content,
+    )
+  ) return "removes" as const;
+  if (
+    /requires?[^.]{0,60}approval|approval[^.]{0,30}(?:is\s+)?required/i.test(
+      content,
+    )
+  ) return "requires" as const;
+  return null;
+};
+
+const deploymentScope = (content: string) => {
+  if (!/deploy(?:ment)?s?|production/i.test(content)) return null;
+  if (/checkout/i.test(content)) return "checkout" as const;
+  if (/production|all\s+production/i.test(content)) return "production" as const;
+  return "deployment" as const;
+};
+
+export function classifyPolicyMemory(
+  verified: string,
+  proposal: string,
+): MemoryClassification {
+  const existingDirection = approvalDirection(verified);
+  const proposalDirection = approvalDirection(proposal);
+  const existingScope = deploymentScope(verified);
+  const proposalScope = deploymentScope(proposal);
+
+  if (!existingDirection || !proposalDirection || !existingScope || !proposalScope) {
+    return "unrelated";
+  }
+  if (existingDirection === proposalDirection) return "compatible";
+  return existingScope === proposalScope ||
+    (existingScope === "production" && proposalScope === "production")
+    ? "contradiction"
+    : "partial_conflict";
+}
+
+const canonicalTimestamp = (memory: MemoryDocument) =>
+  (memory.verifiedAt ?? memory.createdAt).getTime();
+
+export function selectCanonicalPolicy(
+  memories: Array<MemoryDocument & { _id: ObjectId }>,
+) {
+  const scoped = memories.filter(
+    (memory) => memory.status === "verified" && approvalDirection(memory.content),
+  );
+  const operatorVerified = scoped.filter((memory) => memory.verifiedAt);
+  const candidates = operatorVerified.length ? operatorVerified : scoped;
+  return candidates.sort((a, b) => canonicalTimestamp(b) - canonicalTimestamp(a))[0] ?? null;
+}
 
 const serializeEvent = (event: EventDocument & { _id: ObjectId }): ContextEventState => ({
   id: event._id.toHexString(),
@@ -130,9 +191,8 @@ const serializeEvent = (event: EventDocument & { _id: ObjectId }): ContextEventS
 
 export async function readState(): Promise<AppState> {
   const { services, memories, events } = await getCollections();
-  const [service, verified, quarantined, allMemories, recentEvents] = await Promise.all([
+  const [service, quarantined, allMemories, recentEvents] = await Promise.all([
     services.findOne({ service: "checkout", environment: "production" }),
-    memories.findOne({ type: "policy", status: "verified" }, { sort: { createdAt: -1 } }),
     memories.findOne(
       { type: "policy", status: "quarantined" },
       { sort: { createdAt: -1 } },
@@ -140,6 +200,7 @@ export async function readState(): Promise<AppState> {
     memories.find().sort({ createdAt: -1 }).toArray(),
     events.find().sort({ createdAt: -1 }).limit(12).toArray(),
   ]);
+  const verified = selectCanonicalPolicy(allMemories);
 
   if (!service || !verified) throw new Error("ContextGuard seed state is unavailable");
 
@@ -159,10 +220,7 @@ export async function readState(): Promise<AppState> {
 }
 
 export function policyRequiresApproval(content: string) {
-  return (
-    /requires?\s+(explicit\s+)?operator\s+approval/i.test(content) &&
-    !/no\s+longer\s+requires?\s+approval/i.test(content)
-  );
+  return approvalDirection(content) === "requires";
 }
 
 export async function retrieveVerifiedMemories(query: string) {
@@ -175,7 +233,9 @@ export async function retrieveVerifiedMemories(query: string) {
     .find({ type: "policy", status: "verified" })
     .sort({ createdAt: -1 })
     .toArray();
-  const ranked = verified
+  const canonical = selectCanonicalPolicy(verified);
+  const safeVerified = canonical ? [canonical] : [];
+  const ranked = safeVerified
     .map((memory) => ({
       memory,
       score: terms.filter((term) => memory.content.toLowerCase().includes(term)).length,
@@ -207,10 +267,10 @@ export async function getServiceState(service: string) {
 export async function guardedDeploy(service: string, version: string) {
   const { services, memories, events } = await getCollections();
   await recordEvent(events, "deploy_requested", `${service} v${version} requested`);
-  const policy = await memories.findOne(
-    { type: "policy", status: "verified" },
-    { sort: { createdAt: -1 } },
-  );
+  const verifiedPolicies = await memories
+    .find({ type: "policy", status: "verified" })
+    .toArray();
+  const policy = selectCanonicalPolicy(verifiedPolicies);
   if (!policy) throw new Error("No verified deployment policy found");
   await recordEvent(events, "memory_retrieved", `ContextGuard retrieved policy from ${policy.source}`);
 
@@ -239,14 +299,26 @@ export async function guardedDeploy(service: string, version: string) {
 }
 
 export async function proposePersistentMemory(content: string, source: string) {
-  const { deterministicConflict } = await import("@/lib/fireworks");
   const { memories, events } = await getCollections();
-  const existing = await memories.findOne(
-    { type: "policy", status: "verified" },
-    { sort: { createdAt: -1 } },
+  const verified = await memories
+    .find({ type: "policy", status: "verified" })
+    .toArray();
+  if (!verified.length) throw new Error("No verified policy found");
+  const comparisons = verified.map((memory) => ({
+    memory,
+    classification: classifyPolicyMemory(memory.content, content),
+  }));
+  const conflicts = comparisons.filter(({ classification }) =>
+    classification === "contradiction" || classification === "partial_conflict"
   );
-  if (!existing) throw new Error("No verified policy found");
-  const conflict = deterministicConflict(existing.content, content);
+  const conflict = conflicts.length > 0;
+  const canonical = selectCanonicalPolicy(verified);
+  const opposing =
+    conflicts.find(({ memory }) => memory._id?.equals(canonical?._id)) ?? conflicts[0];
+  const classification = opposing?.classification ??
+    (comparisons.every(({ classification: value }) => value === "unrelated")
+      ? "unrelated"
+      : "compatible");
   const status: MemoryStatus = conflict ? "quarantined" : "verified";
   const now = new Date();
   const inserted = await memories.insertOne({
@@ -257,13 +329,23 @@ export async function proposePersistentMemory(content: string, source: string) {
     source,
     createdAt: now,
     ...(conflict ? { quarantinedAt: now } : {}),
+    classification,
+    ...(conflict
+      ? { conflictsWith: conflicts.flatMap(({ memory }) => memory._id ? [memory._id] : []) }
+      : {}),
   });
   await recordEvent(events, "memory_proposed", "New persistent context submitted");
   if (conflict) {
-    await recordEvent(events, "conflict_detected", "Incoming context contradicts verified policy");
+    await recordEvent(
+      events,
+      "conflict_detected",
+      `Incoming context classified as ${classification} against verified policy`,
+    );
     await recordEvent(events, "memory_quarantined", `Memory ${inserted.insertedId.toHexString()} quarantined`);
     await recordEvent(events, "court_opened", `Memory Court opened for ${inserted.insertedId.toHexString()}`);
     const { adjudicateMemoryConflict } = await import("@/lib/memory-court");
+    if (!opposing) throw new Error("Conflicting memory comparison is unavailable");
+    const existing = opposing.memory;
     const adjudication = await adjudicateMemoryConflict(
       {
         content: existing.content,
@@ -279,6 +361,7 @@ export async function proposePersistentMemory(content: string, source: string) {
         source,
         createdAt: now.toISOString(),
       },
+      opposing.classification as "contradiction" | "partial_conflict",
     );
     await memories.updateOne(
       { _id: inserted.insertedId },
@@ -292,7 +375,7 @@ export async function proposePersistentMemory(content: string, source: string) {
     return {
       outcome: "quarantined" as const,
       memoryId: inserted.insertedId.toHexString(),
-      reason: "Direct contradiction of the currently verified policy.",
+      reason: `${opposing.classification} with currently verified policy.`,
       existingPolicy: existing.content,
       adjudication,
     };
@@ -300,9 +383,7 @@ export async function proposePersistentMemory(content: string, source: string) {
   return {
     outcome: "accepted" as const,
     memoryId: inserted.insertedId.toHexString(),
-    reason: conflict
-      ? "Direct contradiction of the currently verified policy."
-      : "No deterministic conflict with verified memory was found.",
-    existingPolicy: existing.content,
+    reason: "Compatible or unrelated to all currently verified memories.",
+    existingPolicy: canonical?.content ?? verified[0].content,
   };
 }
