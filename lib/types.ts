@@ -17,6 +17,22 @@ export type MemoryState = {
   source: string;
   createdAt: string;
   supersededAt?: string;
+  supersedes?: string;
+  supersededBy?: string;
+  verifiedAt?: string;
+  verifiedBy?: string;
+  quarantinedAt?: string;
+  adjudication?: MemoryCourtAdjudication;
+};
+
+export type MemoryCourtAdjudication = {
+  relationship: "contradiction" | "supporting" | "unrelated";
+  existingArgument: string;
+  incomingArgument: string;
+  judgeReasoning: string;
+  recommendedVerdict: "accept" | "quarantine" | "supersede";
+  confidence: number;
+  provider: "fireworks" | "deterministic";
 };
 
 export type ContextEventState = {
@@ -30,6 +46,7 @@ export type AppState = {
   service: ServiceState;
   verifiedMemory: MemoryState;
   quarantinedMemory: MemoryState | null;
+  memories: MemoryState[];
   events: ContextEventState[];
 };
 

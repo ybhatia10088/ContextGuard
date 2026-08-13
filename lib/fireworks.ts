@@ -65,6 +65,6 @@ export const deterministicConflict = (verified: string, incoming: string) => {
   const existingRequiresApproval =
     /requires?\s+(explicit\s+)?operator\s+approval/i.test(verified);
   const incomingRemovesApproval =
-    /no\s+longer\s+requires?\s+approval/i.test(incoming);
+    /no\s+longer\s+requires?\s+approval|bypass\s+(?:operator\s+)?approval|deploy(?:ment)?s?\s+(?:can|may)\s+(?:proceed\s+)?without\s+approval/i.test(incoming);
   return existingRequiresApproval && incomingRemovesApproval;
 };

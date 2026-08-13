@@ -22,12 +22,10 @@ const CANONICAL_POLICY =
 /**
  * Trust score written for the canonical policy.
  *
- * NOTE: the application (lib/contextguard.ts, app/api/verify/route.ts) stores
- * trust on a 0-100 scale (98 / 65 / 31). The default below is the 0-1 value
- * requested for this script. If the UI renders trust straight from the record,
- * run with DEMO_TRUST=98 to match what the app itself writes.
+ * The application stores trust on a 0-100 scale (98 / 65 / 31), so the reset
+ * uses the same representation rendered by the UI.
  */
-const CANONICAL_TRUST = Number(process.env.DEMO_TRUST ?? "0.98");
+const CANONICAL_TRUST = Number(process.env.DEMO_TRUST ?? "98");
 
 function fail(message: string): never {
   console.error(`✖ ${message}`);

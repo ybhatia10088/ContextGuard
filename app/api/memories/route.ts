@@ -4,7 +4,6 @@ import {
   proposePersistentMemory,
   readState,
 } from "@/lib/contextguard";
-import { explainConflict } from "@/lib/fireworks";
 
 export async function GET() {
   try {
@@ -24,7 +23,10 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json().catch(() => ({}))) as { content?: string };
+    const body = (await request.json().catch(() => ({}))) as {
+      content?: string;
+      source?: string;
+    };
     const content = body.content?.trim() || CONFLICTING_POLICY;
     const { memories } = await getCollections();
     const existing = await memories.findOne(
@@ -33,15 +35,19 @@ export async function POST(request: Request) {
     );
     if (!existing) throw new Error("No verified policy found");
 
-    const result = await proposePersistentMemory(content, "Unverified instruction");
+    const result = await proposePersistentMemory(
+      content,
+      body.source?.trim() || "Unverified instruction",
+    );
     const conflict = result.outcome === "quarantined";
-
-    let analysis = null;
-    if (conflict) {
-      analysis = await explainConflict(existing.content, content);
-    }
-
-    return Response.json({ conflict, analysis, state: await readState() }, { status: 201 });
+    return Response.json(
+      {
+        conflict,
+        adjudication: "adjudication" in result ? result.adjudication : null,
+        state: await readState(),
+      },
+      { status: 201 },
+    );
   } catch (error) {
     console.error("Memory injection failed:", error);
     return Response.json({ error: "Memory injection failed" }, { status: 500 });

@@ -29,6 +29,12 @@ type MemoryDocument = {
   source: string;
   createdAt: Date;
   supersededAt?: Date;
+  supersedes?: ObjectId;
+  supersededBy?: ObjectId;
+  verifiedAt?: Date;
+  verifiedBy?: string;
+  quarantinedAt?: Date;
+  adjudication?: MemoryState["adjudication"];
 };
 
 type EventDocument = {
@@ -105,6 +111,14 @@ const serializeMemory = (memory: MemoryDocument & { _id: ObjectId }): MemoryStat
   ...(memory.supersededAt
     ? { supersededAt: memory.supersededAt.toISOString() }
     : {}),
+  ...(memory.supersedes ? { supersedes: memory.supersedes.toHexString() } : {}),
+  ...(memory.supersededBy ? { supersededBy: memory.supersededBy.toHexString() } : {}),
+  ...(memory.verifiedAt ? { verifiedAt: memory.verifiedAt.toISOString() } : {}),
+  ...(memory.verifiedBy ? { verifiedBy: memory.verifiedBy } : {}),
+  ...(memory.quarantinedAt
+    ? { quarantinedAt: memory.quarantinedAt.toISOString() }
+    : {}),
+  ...(memory.adjudication ? { adjudication: memory.adjudication } : {}),
 });
 
 const serializeEvent = (event: EventDocument & { _id: ObjectId }): ContextEventState => ({
@@ -116,13 +130,14 @@ const serializeEvent = (event: EventDocument & { _id: ObjectId }): ContextEventS
 
 export async function readState(): Promise<AppState> {
   const { services, memories, events } = await getCollections();
-  const [service, verified, quarantined, recentEvents] = await Promise.all([
+  const [service, verified, quarantined, allMemories, recentEvents] = await Promise.all([
     services.findOne({ service: "checkout", environment: "production" }),
     memories.findOne({ type: "policy", status: "verified" }, { sort: { createdAt: -1 } }),
     memories.findOne(
       { type: "policy", status: "quarantined" },
       { sort: { createdAt: -1 } },
     ),
+    memories.find().sort({ createdAt: -1 }).toArray(),
     events.find().sort({ createdAt: -1 }).limit(12).toArray(),
   ]);
 
@@ -138,6 +153,7 @@ export async function readState(): Promise<AppState> {
     },
     verifiedMemory: serializeMemory(verified),
     quarantinedMemory: quarantined ? serializeMemory(quarantined) : null,
+    memories: allMemories.map(serializeMemory),
     events: recentEvents.map(serializeEvent),
   };
 }
@@ -232,21 +248,57 @@ export async function proposePersistentMemory(content: string, source: string) {
   if (!existing) throw new Error("No verified policy found");
   const conflict = deterministicConflict(existing.content, content);
   const status: MemoryStatus = conflict ? "quarantined" : "verified";
+  const now = new Date();
   const inserted = await memories.insertOne({
     content,
     type: "policy",
     status,
     trust: conflict ? 31 : 65,
     source,
-    createdAt: new Date(),
+    createdAt: now,
+    ...(conflict ? { quarantinedAt: now } : {}),
   });
-  await recordEvent(events, "memory_injected", "New policy context received");
+  await recordEvent(events, "memory_proposed", "New persistent context submitted");
   if (conflict) {
     await recordEvent(events, "conflict_detected", "Incoming context contradicts verified policy");
     await recordEvent(events, "memory_quarantined", `Memory ${inserted.insertedId.toHexString()} quarantined`);
+    await recordEvent(events, "court_opened", `Memory Court opened for ${inserted.insertedId.toHexString()}`);
+    const { adjudicateMemoryConflict } = await import("@/lib/memory-court");
+    const adjudication = await adjudicateMemoryConflict(
+      {
+        content: existing.content,
+        status: existing.status,
+        trust: existing.trust,
+        source: existing.source,
+        createdAt: existing.createdAt.toISOString(),
+      },
+      {
+        content,
+        status,
+        trust: 31,
+        source,
+        createdAt: now.toISOString(),
+      },
+    );
+    await memories.updateOne(
+      { _id: inserted.insertedId },
+      { $set: { adjudication } },
+    );
+    await recordEvent(
+      events,
+      "court_adjudicated",
+      `${adjudication.provider} recommendation: ${adjudication.recommendedVerdict}`,
+    );
+    return {
+      outcome: "quarantined" as const,
+      memoryId: inserted.insertedId.toHexString(),
+      reason: "Direct contradiction of the currently verified policy.",
+      existingPolicy: existing.content,
+      adjudication,
+    };
   }
   return {
-    outcome: conflict ? ("quarantined" as const) : ("accepted" as const),
+    outcome: "accepted" as const,
     memoryId: inserted.insertedId.toHexString(),
     reason: conflict
       ? "Direct contradiction of the currently verified policy."

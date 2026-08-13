@@ -14,16 +14,37 @@ export async function POST(request: Request) {
     }
 
     const now = new Date();
+    await recordEvent(events, "human_verification_received", `Operator verification received for ${incoming._id.toHexString()}`);
+    const activePolicies = await memories
+      .find({ type: "policy", status: "verified" })
+      .project<{ _id: ObjectId }>({ _id: 1 })
+      .toArray();
+    const activePolicyIds = activePolicies.map((policy) => policy._id);
     const superseded = await memories.updateMany(
       { type: "policy", status: "verified" },
-      { $set: { status: "superseded", supersededAt: now } },
+      {
+        $set: {
+          status: "superseded",
+          supersededAt: now,
+          supersededBy: incoming._id,
+        },
+      },
     );
     await recordEvent(events, "memory_superseded", `${superseded.modifiedCount} verified policy superseded`);
     await memories.updateOne(
       { _id: incoming._id },
-      { $set: { status: "verified", trust: 98 } },
+      {
+        $set: {
+          status: "verified",
+          trust: 98,
+          verifiedAt: now,
+          verifiedBy: "operator",
+          ...(activePolicyIds[0] ? { supersedes: activePolicyIds[0] } : {}),
+        },
+      },
     );
     await recordEvent(events, "memory_verified", `Memory ${incoming._id.toHexString()} verified by operator`);
+    await recordEvent(events, "memory_healed", `Trusted memory reconciled to ${incoming._id.toHexString()}`);
 
     return Response.json({ state: await readState() });
   } catch (error) {
